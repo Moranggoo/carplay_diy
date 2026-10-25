@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AutoPlay Web - Central Multimídia UX/UI CarPlay</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        carplay: {
+                            bg: '#09090b',
+                            card: '#18181b',
+                            border: '#27272a',
+                            accent: '#007afc',
+                            green: '#30d158',
+                            orange: '#ff9f0a',
+                            red: '#ff453a'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['SF Pro Display', '-apple-system', 'BlinkMacSystemFont', 'Inter', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- FontAwesome para Ícones de Alta Visibilidade -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Leaflet.js para Mapa Interativo em Tempo Real -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        /* Desabilita seleção e gestos padrão que possam atrapalhar no painel do carro */
+        * {
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+
+        /* Animações e Estilizações Customizadas */
+        .glass-card {
+            background: rgba(24, 24, 27, 0.75);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .glass-card-light {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        /* Efeito de Toque Instantâneo (Fat-Finger Friendly) */
+        .active-tap:active {
+            transform: scale(0.95);
+            filter: brightness(1.2);
+        }
+
+        /* Oculta scrollbars totalmente */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+
+        /* Tiles do Mapa Noturno */
+        .leaflet-tile-pane {
+            filter: brightness(0.7) invert(1) contrast(1.3) hue-rotate(200deg) saturate(0.3);
+        }
+        
+        .light-mode-map .leaflet-tile-pane {
+            filter: none !important;
+        }
+    </style>
+</head>
+<body class="bg-carplay-bg text-white h-screen w-screen overflow-hidden select-none font-sans flex flex-col transition-colors duration-300">
+
+    <!-- OVERLAY DE INICIALIZAÇÃO (MANDATÓRIO PARA WAKE LOCK & FULLSCREEN) -->
+    <div id="start-overlay" class="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-6 text-center">
+        <div class="w-24 h-24 bg-carplay-accent rounded-full flex items-center justify-center mb-6 shadow-lg shadow-carplay-accent/30 animate-pulse">
+            <i class="fa-solid fa-car-side text-4xl text-white"></i>
+        </div>
+        <h1 class="text-3xl font-bold tracking-tight mb-2">AutoPlay Mode</h1>
+        <p class="text-zinc-400 text-lg max-w-md mb-8">Toque para iniciar a central multimídia, travar a tela acesa e entrar em modo de navegação.</p>
+        
+        <button id="btn-enter-car" class="w-full max-w-xs bg-carplay-accent hover:bg-blue-600 active:scale-95 text-white font-bold text-xl py-5 px-8 rounded-2xl shadow-xl flex items-center justify-center gap-3 transition-all">
+            <i class="fa-solid fa-power-off"></i>
+            Entrar no Modo Carro
+        </button>
+        <p class="text-xs text-zinc-500 mt-6"><i class="fa-solid fa-mobile-screen-button mr-1"></i> Recomenda-se posicionar o celular em modo Paisagem (Horizontal).</p>
+    </div>
+
+    <!-- MAIN CARPLAY CONTAINER -->
+    <div class="flex-1 flex flex-col h-full w-full p-2 gap-2 overflow-hidden">
+        
+        <!-- BARRA DE STATUS SUPERIOR -->
+        <header id="top-bar" class="h-10 w-full glass-card rounded-2xl flex items-center justify-between px-4 text-sm font-semibold shrink-0">
+            <!-- Relógio e Clima -->
+            <div class="flex items-center gap-4">
+                <div id="clock-display" class="text-base font-bold tracking-wider text-white">00:00</div>
+                <div class="h-4 w-[1px] bg-zinc-700"></div>
+                <div class="flex items-center gap-2 text-zinc-300">
+                    <i id="weather-icon" class="fa-solid fa-sun text-yellow-400"></i>
+                    <span id="weather-temp">24°C</span>
+                    <span id="weather-city" class="text-xs text-zinc-400 font-normal hidden sm:inline">São Paulo</span>
+                </div>
+            </div>
+
+            <!-- Status de Hardware e Conectividade -->
+            <div class="flex items-center gap-4 text-xs">
+                <!-- Indicador de Velocidade Atual -->
+                <div class="flex items-center gap-1.5 bg-carplay-accent/20 px-2.5 py-1 rounded-lg text-carplay-accent border border-carplay-accent/30">
+                    <i class="fa-solid fa-gauge-high"></i>
+                    <span id="speedometer" class="font-bold text-sm">0</span> <span class="text-[10px]">km/h</span>
+                </div>
+
+                <!-- Wake Lock Status (Manter tela acesa) -->
+                <div id="wakelock-badge" class="flex items-center gap-1 text-zinc-500" title="Status do Bloqueio de Tela">
+                    <i class="fa-solid fa-lock text-xs"></i>
+                    <span class="text-[10px] hidden md:inline">Wake Lock</span>
+                </div>
+
+                <!-- Bateria -->
+                <div class="flex items-center gap-1.5 text-zinc-300">
+                    <span id="battery-level">100%</span>
+                    <i id="battery-icon" class="fa-solid fa-battery-full text-carplay-green"></i>
+                </div>
+
+                <!-- GPS Status -->
+                <div id="gps-status" class="flex items-center gap-1 text-carplay-green">
+                    <i class="fa-solid fa-location-arrow"></i>
+                </div>
+            </div>
+        </header>
+
+        <!-- CORPO PRINCIPAL (DASHBOARD DIVIDIDO) -->
+        <div class="flex-1 flex gap-2 overflow-hidden h-[calc(100%-3rem)]">
+            
+            <!-- DOCK LATERAL / BARRA DE NAVEGAÇÃO APPS -->
+            <nav class="w-16 md:w-20 glass-card rounded-2xl flex flex-col items-center justify-between py-3 shrink-0">
+                <div class="flex flex-col gap-3 w-full px-2">
+                    <!-- Botão Dashboard / Home -->
+                    <button id="nav-btn-home" onclick="switchView('home')" class="nav-app-btn active-tap w-full aspect-square rounded-2xl bg-carplay-accent text-white flex items-center justify-center text-xl shadow-lg shadow-carplay-accent/20">
+                        <i class="fa-solid fa-border-all"></i>
+                    </button>
+                    <!-- Botão Mapa -->
+                    <button id="nav-btn-maps" onclick="switchView('maps')" class="nav-app-btn active-tap w-full aspect-square rounded-2xl bg-zinc-800 text-zinc-300 hover:text-white flex items-center justify-center text-xl">
+                        <i class="fa-solid fa-map-location-dot"></i>
+                    </button>
+                    <!-- Botão Mídia -->
+                    <button id="nav-btn-music" onclick="switchView('music')" class="nav-app-btn active-tap w-full aspect-square rounded-2xl bg-zinc-800 text-zinc-300 hover:text-white flex items-center justify-center text-xl">
+                        <i class="fa-solid fa-music"></i>
+                    </button>
+                    <!-- Botão Contatos -->
+                    <button id="nav-btn-phone" onclick="switchView('phone')" class="nav-app-btn active-tap w-full aspect-square rounded-2xl bg-zinc-800 text-zinc-300 hover:text-white flex items-center justify-center text-xl">
+                        <i class="fa-solid fa-phone"></i>
+                    </button>
+                </div>
+
+                <!-- Comando de Voz Siri/Google Style -->
+                <button id="btn-voice-command" class="active-tap w-12 h-12 md:w-14 md:h-14 rounded-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 p-[2px] shadow-lg shadow-purple-500/20">
+                    <div class="w-full h-full bg-carplay-bg rounded-full flex items-center justify-center text-white">
+                        <i class="fa-solid fa-microphone text-lg"></i>
+                    </div>
+                </button>
+            </nav>
+
+            <!-- ÁREA DE CONTEÚDO PRINCIPAL (DASHBOARD & VIEWS) -->
+            <main class="flex-1 relative rounded-2xl overflow-hidden">
+                
+                <!-- VIEW 1: DASHBOARD SPLIT (ESTILO CARPLAY) -->
+                <div id="view-home" class="view-panel absolute inset-0 flex gap-2">
+                    
+                    <!-- Lado Esquerdo: WIDGET DE MAPA NAVEGAÇÃO -->
+                    <div class="w-7/12 h-full glass-card rounded-2xl overflow-hidden relative flex flex-col">
+                        <div id="map-container" class="w-full h-full z-0"></div>
+                        
+                        <!-- Overlay do Mapa: Atalhos de Rota Rápidos -->
+                        <div class="absolute top-3 left-3 z-10 flex gap-2">
+                            <button onclick="launchNavigation('Casa')" class="active-tap bg-carplay-bg/90 backdrop-blur-md border border-zinc-700/60 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center gap-2 shadow-lg">
+                                <i class="fa-solid fa-house text-carplay-accent"></i> Casa
+                            </button>
+                            <button onclick="launchNavigation('Trabalho')" class="active-tap bg-carplay-bg/90 backdrop-blur-md border border-zinc-700/60 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center gap-2 shadow-lg">
+                                <i class="fa-solid fa-briefcase text-carplay-orange"></i> Trabalho
+                            </button>
+                            <button onclick="launchNavigation('Posto')" class="active-tap bg-carplay-bg/90 backdrop-blur-md border border-zinc-700/60 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center gap-2 shadow-lg">
+                                <i class="fa-solid fa-gas-pump text-carplay-green"></i> Posto
+                            </button>
+                        </div>
+
+                        <!-- Overlay Inferior do Mapa: Botões de Lançamento Externo (Waze / Google Maps) -->
+                        <div class="absolute bottom-3 right-3 z-10 flex gap-2">
+                            <button onclick="openExternalMap('waze')" class="active-tap bg-sky-500 hover:bg-sky-600 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center gap-1.5 shadow-lg">
+                                <i class="fa-brands fa-waze text-base"></i> Waze
+                            </button>
+                            <button onclick="openExternalMap('google')" class="active-tap bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center gap-1.5 shadow-lg">
+                                <i class="fa-solid fa-map text-base"></i> Maps
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Lado Direito: WIDGETS DE MÍDIA E AÇÕES RÁPIDAS -->
+                    <div class="w-5/12 h-full flex flex-col gap-2">
+                        
+                        <!-- WIDGET PLAYER DE MÚSICA -->
+                        <div class="h-1/2 glass-card rounded-2xl p-3 flex flex-col justify-between relative overflow-hidden">
+                            <!-- Capa de fundo borrada -->
+                            <div id="media-bg-blur" class="absolute inset-0 bg-cover bg-center opacity-15 blur-xl -z-10" style="background-image: url('https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=300&q=80')"></div>
+
+                            <div class="flex items-center gap-3">
+                                <img id="album-art" src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=300&q=80" class="w-14 h-14 md:w-16 md:h-16 rounded-xl object-cover shadow-md border border-zinc-700/50" alt="Capa do Álbum">
+                                <div class="overflow-hidden flex-1">
+                                    <h4 id="song-title" class="font-bold text-sm md:text-base truncate text-white">Drive Synthwave</h4>
+                                    <p id="song-artist" class="text-xs text-zinc-400 truncate">Retro Beats Auto</p>
+                                    <div class="mt-1 flex items-center gap-2">
+                                        <span class="text-[10px] text-carplay-accent font-semibold bg-carplay-accent/20 px-2 py-0.5 rounded-full"><i class="fa-brands fa-spotify mr-1"></i> Audio Player</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Barra de Progresso da Música -->
+                            <div class="w-full flex flex-col gap-1 my-1">
+                                <div class="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+                                    <div id="song-progress" class="bg-carplay-accent h-full w-1/3 transition-all duration-300"></div>
+                                </div>
+                                <div class="flex justify-between text-[10px] text-zinc-500 font-mono">
+                                    <span id="time-current">1:12</span>
+                                    <span id="time-total">3:45</span>
+                                </div>
+                            </div>
+
+                            <!-- Controles de Áudio Fat-Finger -->
+                            <div class="flex items-center justify-around">
+                                <button onclick="mediaPrev()" class="active-tap text-zinc-300 hover:text-white text-xl p-2">
+                                    <i class="fa-solid fa-backward-step"></i>
+                                </button>
+                                <button id="btn-play-pause" onclick="togglePlay()" class="active-tap w-10 h-10 md:w-12 md:h-12 rounded-full bg-white text-black flex items-center justify-center text-lg shadow-lg">
+                                    <i id="play-icon" class="fa-solid fa-play ml-0.5"></i>
+                                </button>
+                                <button onclick="mediaNext()" class="active-tap text-zinc-300 hover:text-white text-xl p-2">
+                                    <i class="fa-solid fa-forward-step"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- WIDGET CHAMADAS RÁPIDAS E ATALHOS -->
+                        <div class="h-1/2 glass-card rounded-2xl p-3 flex flex-col justify-between">
+                            <span class="text-xs font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-phone-volume text-carplay-green"></i> Discagem Rápida
+                            </span>
+
+                            <div class="grid grid-cols-3 gap-2 my-auto">
+                                <a href="tel:190" class="active-tap glass-card hover:bg-zinc-800 p-2 rounded-xl flex flex-col items-center justify-center text-center gap-1 border border-zinc-700/40">
+                                    <div class="w-8 h-8 rounded-full bg-carplay-red/20 text-carplay-red flex items-center justify-center text-sm">
+                                        <i class="fa-solid fa-user-shield"></i>
+                                    </div>
+                                    <span class="text-[11px] font-bold text-zinc-200">Emergência</span>
+                                </a>
+
+                                <a href="tel:+5511999999999" class="active-tap glass-card hover:bg-zinc-800 p-2 rounded-xl flex flex-col items-center justify-center text-center gap-1 border border-zinc-700/40">
+                                    <div class="w-8 h-8 rounded-full bg-carplay-accent/20 text-carplay-accent flex items-center justify-center text-sm">
+                                        <i class="fa-solid fa-heart"></i>
+                                    </div>
+                                    <span class="text-[11px] font-bold text-zinc-200">Amor</span>
+                                </a>
+
+                                <a href="tel:+5511988888888" class="active-tap glass-card hover:bg-zinc-800 p-2 rounded-xl flex flex-col items-center justify-center text-center gap-1 border border-zinc-700/40">
+                                    <div class="w-8 h-8 rounded-full bg-carplay-green/20 text-carplay-green flex items-center justify-center text-sm">
+                                        <i class="fa-solid fa-house-user"></i>
+                                    </div>
+                                    <span class="text-[11px] font-bold text-zinc-200">Mãe</span>
+                                </a>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- VIEW 2: MAPA EM TELA CHEIA -->
+                <div id="view-maps" class="view-panel absolute inset-0 hidden glass-card rounded-2xl overflow-hidden">
+                    <div id="map-fullscreen" class="w-full h-full"></div>
+                </div>
+
+                <!-- VIEW 3: PLAYER DE MÚSICA EXPANDIDO -->
+                <div id="view-music" class="view-panel absolute inset-0 hidden glass-card rounded-2xl p-6 flex items-center justify-center">
+                    <div class="max-w-md w-full flex flex-col items-center gap-4 text-center">
+                        <img src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=400&q=80" class="w-40 h-40 rounded-2xl shadow-2xl border border-zinc-700/50">
+                        <div>
+                            <h2 class="text-2xl font-bold">Drive Synthwave</h2>
+                            <p class="text-zinc-400">Retro Beats Auto - Car Music</p>
+                        </div>
+                        <div class="flex items-center gap-6 mt-4">
+                            <button onclick="mediaPrev()" class="text-2xl text-zinc-400 active-tap"><i class="fa-solid fa-backward-step"></i></button>
+                            <button onclick="togglePlay()" class="w-16 h-16 rounded-full bg-carplay-accent text-white text-2xl flex items-center justify-center shadow-lg active-tap"><i class="fa-solid fa-play"></i></button>
+                            <button onclick="mediaNext()" class="text-2xl text-zinc-400 active-tap"><i class="fa-solid fa-forward-step"></i></button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- VIEW 4: CONTATOS EXPANDIDO -->
+                <div id="view-phone" class="view-panel absolute inset-0 hidden glass-card rounded-2xl p-6 flex flex-col gap-4">
+                    <h2 class="text-xl font-bold"><i class="fa-solid fa-address-book text-carplay-green mr-2"></i>Contatos Rápidos</h2>
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+                        <a href="tel:+5511999999999" class="p-4 glass-card rounded-xl flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center font-bold">A</div>
+                            <div>
+                                <div class="font-bold">Amor</div>
+                                <div class="text-xs text-zinc-400">+55 11 99999-9999</div>
+                            </div>
+                        </a>
+                        <a href="tel:+5511988888888" class="p-4 glass-card rounded-xl flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-green-500 flex items-center justify-center font-bold">M</div>
+                            <div>
+                                <div class="font-bold">Mãe</div>
+                                <div class="text-xs text-zinc-400">+55 11 98888-8888</div>
+                            </div>
+                        </a>
+                        <a href="tel:08007070123" class="p-4 glass-card rounded-xl flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-orange-500 flex items-center justify-center font-bold">G</div>
+                            <div>
+                                <div class="font-bold">Guincho / Seguro</div>
+                                <div class="text-xs text-zinc-400">0800 7070 123</div>
+                            </div>
+                        </a>
+                    </div>
+                </div>
+
+            </main>
+        </div>
+
+        <!-- DOCK INFERIOR DE AJUSTES E RÁPIDOS -->
+        <footer class="h-12 w-full glass-card rounded-2xl flex items-center justify-between px-4 shrink-0">
+            <!-- Alternar Modo Claro/Escuro -->
+            <button id="btn-theme-toggle" class="active-tap text-zinc-400 hover:text-white flex items-center gap-2 text-xs font-bold bg-zinc-800/80 px-3 py-1.5 rounded-xl border border-zinc-700/50">
+                <i class="fa-solid fa-circle-half-stroke text-carplay-orange"></i>
+                <span class="hidden sm:inline">Modo Alto Contraste</span>
+            </button>
+
+            <!-- Controle de Mudo / Som -->
+            <button id="btn-mute" class="active-tap text-zinc-400 hover:text-white flex items-center gap-2 text-xs font-bold bg-zinc-800/80 px-3 py-1.5 rounded-xl border border-zinc-700/50">
+                <i id="mute-icon" class="fa-solid fa-volume-high text-carplay-green"></i>
+                <span id="mute-text" class="hidden sm:inline">Som Ativo</span>
+            </button>
+
+            <!-- Teste de Velocímetro (Simulador) -->
+            <button onclick="toggleSimulatedSpeed()" class="active-tap text-zinc-400 hover:text-white flex items-center gap-2 text-xs font-bold bg-zinc-800/80 px-3 py-1.5 rounded-xl border border-zinc-700/50">
+                <i class="fa-solid fa-vial text-carplay-accent"></i>
+                <span class="hidden sm:inline">Simular Velocidade</span>
+            </button>
+
+            <!-- Alternar Fullscreen -->
+            <button id="btn-fullscreen" class="active-tap text-zinc-400 hover:text-white flex items-center gap-2 text-xs font-bold bg-zinc-800/80 px-3 py-1.5 rounded-xl border border-zinc-700/50">
+                <i class="fa-solid fa-expand"></i>
+                <span class="hidden sm:inline">Tela Cheia</span>
+            </button>
+        </footer>
+
+    </div>
+
+    <!-- AUDIO ELEMENT PARA REPRODUÇÃO VIA MEDIA SESSION -->
+    <audio id="audio-player" loop preload="none">
+        <source src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" type="audio/mpeg">
+    </audio>
+
+    <!-- TOAST MODAL DE AVISO / COMANDO DE VOZ -->
+    <div id="voice-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div class="glass-card max-w-sm w-full p-6 rounded-3xl text-center flex flex-col items-center gap-4 border border-purple-500/30">
+            <div class="w-20 h-20 rounded-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 flex items-center justify-center text-3xl text-white animate-bounce">
+                <i class="fa-solid fa-microphone"></i>
+            </div>
+            <h3 class="text-xl font-bold">Ouvindo comando...</h3>
+            <p id="voice-transcript" class="text-zinc-400 text-sm italic">"Diga algo como: 'Tocar música' ou 'Ir para casa'"</p>
+            <button onclick="closeVoiceModal()" class="mt-2 bg-zinc-800 text-white px-6 py-2 rounded-xl text-xs font-bold active-tap">Cancelar</button>
+        </div>
+    </div>
+
+    <!-- JAVASCRIPT LÓGICA DO APP -->
+    <script>
+        // Estado Global da Aplicação
+        let wakeLock = null;
+        let isPlaying = false;
+        let isMuted = false;
+        let mainMap = null;
+        let fullMap = null;
+        let userMarker = null;
+        let simulatedSpeedInterval = null;
+        let currentPos = [-23.55052, -46.633308]; // Padrão: São Paulo
+
+        // 1. INICIALIZAÇÃO DA APLICAÇÃO
+        document.addEventListener('DOMContentLoaded', () => {
+            initClock();
+            initBattery();
+            initGeolocation();
+            initSpeechRecognition();
+        });
+
+        // Botão de Entrada "Entrar no Modo Carro"
+        document.getElementById('btn-enter-car').addEventListener('click', async () => {
+            document.getElementById('start-overlay').classList.add('hidden');
+            
+            // Força modo Tela Cheia se suportado
+            requestFullscreen();
+
+            // Ativa o Wake Lock para manter tela acesa
+            await requestWakeLock();
+
+            // Tenta travar em Orientação Paisagem
+            try {
+                if (screen.orientation && screen.orientation.lock) {
+                    await screen.orientation.lock('landscape');
+                }
+            } catch (err) {
+                console.log("Bloqueio de orientação não suportado ou negado pelo SO.");
+            }
+
+            // Inicializa Mapas Leaflet após overlay desaparecer
+            setTimeout(() => {
+                initLeafletMaps();
+            }, 300);
+        });
+
+        // 2. SISTEMA DE WAKE LOCK (MANTÉM A TELA ACESA NO PAINEL)
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    const badge = document.getElementById('wakelock-badge');
+                    badge.classList.remove('text-zinc-500');
+                    badge.classList.add('text-carplay-green');
+                    
+                    wakeLock.addEventListener('release', () => {
+                        badge.classList.remove('text-carplay-green');
+                        badge.classList.add('text-zinc-500');
+                    });
+                } catch (err) {
+                    console.error(`Wake Lock Error: ${err.name}, ${err.message}`);
+                }
+            }
+        }
+
+        // Reativa Wake Lock se o usuário minimizar e voltar para o app
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+
+        // 3. TELA CHEIA (FULLSCREEN API)
+        function requestFullscreen() {
+            const doc = document.documentElement;
+            if (doc.requestFullscreen) {
+                doc.requestFullscreen().catch(err => console.log(err));
+            } else if (doc.webkitRequestFullscreen) {
+                doc.webkitRequestFullscreen();
+            }
+        }
+
+        document.getElementById('btn-fullscreen').addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                requestFullscreen();
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        });
+
+        // 4. RELÓGIO DIGITAL EM TEMPO REAL
+        function initClock() {
+            const clockEl = document.getElementById('clock-display');
+            const updateTime = () => {
+                const now = new Date();
+                const hours = String(now.getHours()).padStart(2, '0');
+                const minutes = String(now.getMinutes()).padStart(2, '0');
+                clockEl.textContent = `${hours}:${minutes}`;
+            };
+            updateTime();
+            setInterval(updateTime, 1000);
+        }
+
+        // 5. BATTERIA (NAVIGATOR BATTERY API)
+        function initBattery() {
+            if ('getBattery' in navigator) {
+                navigator.getBattery().then(battery => {
+                    const updateBattery = () => {
+                        const level = Math.round(battery.level * 100);
+                        document.getElementById('battery-level').textContent = `${level}%`;
+                        const icon = document.getElementById('battery-icon');
+                        
+                        if (battery.charging) {
+                            icon.className = 'fa-solid fa-battery-charging text-carplay-green';
+                        } else if (level <= 20) {
+                            icon.className = 'fa-solid fa-battery-quarter text-carplay-red';
+                        } else {
+                            icon.className = 'fa-solid fa-battery-full text-carplay-green';
+                        }
+                    };
+                    updateBattery();
+                    battery.addEventListener('levelchange', updateBattery);
+                    battery.addEventListener('chargingchange', updateBattery);
+                });
+            }
+        }
+
+        // 6. GEOLOCALIZAÇÃO & VELOCÍMETRO
+        function initGeolocation() {
+            if ('geolocation' in navigator) {
+                navigator.geolocation.watchPosition(
+                    (position) => {
+                        const speed = position.coords.speed; // Velocidade em m/s
+                        currentPos = [position.coords.latitude, position.coords.longitude];
+
+                        // Converte m/s para km/h
+                        const kmh = speed ? Math.round(speed * 3.6) : 0;
+                        document.getElementById('speedometer').textContent = kmh;
+
+                        // Atualiza mapas com a nova posição real
+                        updateMapPosition(currentPos);
+                        document.getElementById('gps-status').className = 'flex items-center gap-1 text-carplay-green';
+                    },
+                    (error) => {
+                        console.warn("Erro ao obter GPS:", error.message);
+                        document.getElementById('gps-status').className = 'flex items-center gap-1 text-carplay-red';
+                    },
+                    { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 }
+                );
+            }
+        }
+
+        // Simulador de Velocidade para Teste Estático
+        function toggleSimulatedSpeed() {
+            const speedEl = document.getElementById('speedometer');
+            if (simulatedSpeedInterval) {
+                clearInterval(simulatedSpeedInterval);
+                simulatedSpeedInterval = null;
+                speedEl.textContent = '0';
+            } else {
+                let mockSpeed = 20;
+                simulatedSpeedInterval = setInterval(() => {
+                    mockSpeed += Math.floor(Math.random() * 7) - 3;
+                    if (mockSpeed < 30) mockSpeed = 35;
+                    if (mockSpeed > 110) mockSpeed = 90;
+                    speedEl.textContent = mockSpeed;
+                }, 800);
+            }
+        }
+
+        // 7. LEAFLET MAPS INTEGRATION
+        function initLeafletMaps() {
+            // Mapa Principal do Widget (Left Panel)
+            mainMap = L.map('map-container', {
+                zoomControl: false,
+                attributionControl: false
+            }).setView(currentPos, 15);
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19
+            }).addTo(mainMap);
+
+            // Marcador Personalizado do Veículo
+            const carIcon = L.divIcon({
+                html: `<div class="w-8 h-8 rounded-full bg-carplay-accent border-2 border-white shadow-lg flex items-center justify-center text-white text-xs"><i class="fa-solid fa-location-arrow transform -rotate-45"></i></div>`,
+                className: '',
+                iconSize: [32, 32],
+                iconAnchor: [16, 16]
+            });
+
+            userMarker = L.marker(currentPos, { icon: carIcon }).addTo(mainMap);
+
+            // Ajusta o tamanho do mapa na renderização
+            setTimeout(() => mainMap.invalidateSize(), 200);
+        }
+
+        function updateMapPosition(pos) {
+            if (mainMap && userMarker) {
+                mainMap.panTo(pos);
+                userMarker.setLatLng(pos);
+            }
+        }
+
+        // Navegação Rápida (Ex: Ir para Casa)
+        function launchNavigation(destination) {
+            alert(`Iniciando navegação para: ${destination}`);
+            // Exemplo de integração nativa Google Maps / Waze
+            window.location.href = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}`;
+        }
+
+        function openExternalMap(app) {
+            if (app === 'waze') {
+                window.location.href = `waze://?ll=${currentPos[0]},${currentPos[1]}&navigate=yes`;
+                setTimeout(() => {
+                    window.location.href = `https://waze.com/ul?ll=${currentPos[0]},${currentPos[1]}&navigate=yes`;
+                }, 1500);
+            } else {
+                window.location.href = `https://maps.google.com/?q=${currentPos[0]},${currentPos[1]}`;
+            }
+        }
+
+        // 8. AUDIO PLAYER & MEDIA SESSION API
+        const audio = document.getElementById('audio-player');
+
+        function togglePlay() {
+            const playIcon = document.getElementById('play-icon');
+            if (isPlaying) {
+                audio.pause();
+                playIcon.className = 'fa-solid fa-play ml-0.5';
+                isPlaying = false;
+            } else {
+                audio.play().then(() => {
+                    playIcon.className = 'fa-solid fa-pause';
+                    isPlaying = true;
+                    setupMediaSession();
+                }).catch(err => console.log("Erro áudio:", err));
+            }
+        }
+
+        function mediaNext() {
+            document.getElementById('song-title').textContent = "Cyberpunk Highway";
+            document.getElementById('song-artist').textContent = "Synth Wave Live";
+            audio.currentTime = 0;
+            if (!isPlaying) togglePlay();
+        }
+
+        function mediaPrev() {
+            document.getElementById('song-title').textContent = "Drive Synthwave";
+            document.getElementById('song-artist').textContent = "Retro Beats Auto";
+            audio.currentTime = 0;
+            if (!isPlaying) togglePlay();
+        }
+
+        // Integra com os controles físicos do volante/fone de ouvido via SO
+        function setupMediaSession() {
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: document.getElementById('song-title').textContent,
+                    artist: document.getElementById('song-artist').textContent,
+                    album: 'AutoPlay Central',
+                    artwork: [
+                        { src: 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=300&q=80', sizes: '300x300', type: 'image/jpeg' }
+                    ]
+                });
+
+                navigator.mediaSession.setActionHandler('play', togglePlay);
+                navigator.mediaSession.setActionHandler('pause', togglePlay);
+                navigator.mediaSession.setActionHandler('previoustrack', mediaPrev);
+                navigator.mediaSession.setActionHandler('nexttrack', mediaNext);
+            }
+        }
+
+        // Atualiza a barra de progresso visual da música
+        audio.addEventListener('timeupdate', () => {
+            if (audio.duration) {
+                const pct = (audio.currentTime / audio.duration) * 100;
+                document.getElementById('song-progress').style.width = `${pct}%`;
+                
+                const curMin = Math.floor(audio.currentTime / 60);
+                const curSec = Math.floor(audio.currentTime % 60).toString().padStart(2, '0');
+                document.getElementById('time-current').textContent = `${curMin}:${curSec}`;
+            }
+        });
+
+        // Mute Toggle
+        document.getElementById('btn-mute').addEventListener('click', () => {
+            isMuted = !isMuted;
+            audio.muted = isMuted;
+            const icon = document.getElementById('mute-icon');
+            const text = document.getElementById('mute-text');
+            if (isMuted) {
+                icon.className = 'fa-solid fa-volume-xmark text-carplay-red';
+                text.textContent = 'Mudo';
+            } else {
+                icon.className = 'fa-solid fa-volume-high text-carplay-green';
+                text.textContent = 'Som Ativo';
+            }
+        });
+
+        // 9. NAVEGAÇÃO ENTRE ABAS DO DOCK LATERAL
+        function switchView(viewName) {
+            document.querySelectorAll('.view-panel').forEach(panel => panel.classList.add('hidden'));
+            document.querySelectorAll('.nav-app-btn').forEach(btn => {
+                btn.classList.remove('bg-carplay-accent', 'text-white');
+                btn.classList.add('bg-zinc-800', 'text-zinc-300');
+            });
+
+            const activePanel = document.getElementById(`view-${viewName}`);
+            const activeBtn = document.getElementById(`nav-btn-${viewName}`);
+
+            if (activePanel) activePanel.classList.remove('hidden');
+            if (activeBtn) {
+                activeBtn.classList.remove('bg-zinc-800', 'text-zinc-300');
+                activeBtn.classList.add('bg-carplay-accent', 'text-white');
+            }
+
+            // Redimensiona o mapa fullscreen se ativado
+            if (viewName === 'maps') {
+                if (!fullMap) {
+                    fullMap = L.map('map-fullscreen', { zoomControl: false }).setView(currentPos, 15);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(fullMap);
+                } else {
+                    setTimeout(() => fullMap.invalidateSize(), 200);
+                }
+            }
+        }
+
+        // 10. RECONHECIMENTO DE VOZ (WEB SPEECH API)
+        function initSpeechRecognition() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const btnVoice = document.getElementById('btn-voice-command');
+
+            if (!SpeechRecognition) {
+                btnVoice.style.display = 'none';
+                return;
+            }
+
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'pt-BR';
+            recognition.continuous = false;
+
+            btnVoice.addEventListener('click', () => {
+                document.getElementById('voice-modal').classList.remove('hidden');
+                document.getElementById('voice-transcript').textContent = "Ouvindo...";
+                try {
+                    recognition.start();
+                } catch(e) {
+                    console.log(e);
+                }
+            });
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript.toLowerCase();
+                document.getElementById('voice-transcript').textContent = `"${transcript}"`;
+
+                setTimeout(() => {
+                    closeVoiceModal();
+                    processVoiceCommand(transcript);
+                }, 1200);
+            };
+
+            recognition.onerror = () => {
+                document.getElementById('voice-transcript').textContent = "Não entendi, tente novamente.";
+                setTimeout(closeVoiceModal, 1500);
+            };
+        }
+
+        function closeVoiceModal() {
+            document.getElementById('voice-modal').classList.add('hidden');
+        }
+
+        function processVoiceCommand(cmd) {
+            if (cmd.includes('tocar') || cmd.includes('música') || cmd.includes('play')) {
+                if (!isPlaying) togglePlay();
+            } else if (cmd.includes('pausar') || cmd.includes('parar')) {
+                if (isPlaying) togglePlay();
+            } else if (cmd.includes('casa') || cmd.includes('navegar')) {
+                launchNavigation('Casa');
+            } else if (cmd.includes('ligar') || cmd.includes('mãe')) {
+                window.location.href = 'tel:+5511988888888';
+            } else if (cmd.includes('mapa')) {
+                switchView('maps');
+            } else {
+                alert(`Comando de voz recebido: "${cmd}"`);
+            }
+        }
+
+        // 11. ALTERNADORA DE TEMA (MODO DIA / NOITE)
+        document.getElementById('btn-theme-toggle').addEventListener('click', () => {
+            const html = document.documentElement;
+            const body = document.body;
+            
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                body.classList.remove('bg-carplay-bg', 'text-white');
+                body.classList.add('bg-gray-200', 'text-black', 'light-mode-map');
+            } else {
+                html.classList.add('dark');
+                body.classList.remove('bg-gray-200', 'text-black', 'light-mode-map');
+                body.classList.add('bg-carplay-bg', 'text-white');
+            }
+        });
+    </script>
+</body>
+</html>
